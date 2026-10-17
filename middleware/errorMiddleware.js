@@ -1,7 +1,16 @@
 const errorMiddleware = (err, req, res, next) => {
-    console.error(err.stack || err.message);
 
-    if (err instanceof SyntaxError && err.status === 400 && "body" in err) {
+    if (process.env.NODE_ENV !== "production") {
+        console.error(err.stack || err.message);
+    } else {
+        console.error("Request failed:", err.message);
+    }
+
+    if (
+        err instanceof SyntaxError &&
+        err.status === 400 &&
+        "body" in err
+    ) {
         return res.status(400).json({
             success: false,
             message: "Invalid JSON format"
@@ -15,14 +24,21 @@ const errorMiddleware = (err, req, res, next) => {
         });
     }
 
+    const requestedStatus = err.statusCode || err.status;
+
     const statusCode =
-        err.statusCode || err.status || 500;
+        Number.isInteger(requestedStatus) &&
+        requestedStatus >= 400 &&
+        requestedStatus <= 599
+            ? requestedStatus
+            : 500;
 
     return res.status(statusCode).json({
         success: false,
-        message: statusCode >= 500
-            ? "Internal Server Error"
-            : err.message || "Request failed"
+        message:
+            statusCode >= 500
+                ? "Internal Server Error"
+                : err.message || "Request failed"
     });
 };
 

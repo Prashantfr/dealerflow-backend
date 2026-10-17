@@ -1,7 +1,34 @@
 const mongoose = require("mongoose");
 const Appointment = require("../models/appointmentModel");
 
+
 const createAppointment = async (req, res) => {
+
+    if (
+        !req.body ||
+        typeof req.body !== "object" ||
+        Array.isArray(req.body)
+    ) {
+        return res.status(400).json({
+            message: "Invalid request body"
+        });
+    }
+
+    const allowedFields = ["name", "date", "dealer"];
+
+    const receivedFields = Object.keys(req.body);
+
+    const invalidFields = receivedFields.filter(
+        (field) => !allowedFields.includes(field)
+    );
+
+    if (invalidFields.length > 0) {
+        return res.status(400).json({
+            message: "Unexpected fields are not allowed",
+            fields: invalidFields
+        });
+    }
+   
     const { name, date, dealer } = req.body;
 
     if (
@@ -42,6 +69,7 @@ const createAppointment = async (req, res) => {
         data: newAppointment
     });
 };
+
 
 const getAppointments = async (req, res) => {
     const appointments = await Appointment.find().sort({ _id: -1 });
@@ -103,15 +131,42 @@ const deleteAppointment = async (req, res) => {
     });
 };
 
+
 const updateAppointment = async (req, res) => {
     const id = req.params.id;
-    const { name, date, dealer } = req.body;
 
     if (!mongoose.isValidObjectId(id)) {
         return res.status(400).json({
             message: "Invalid appointment ID"
         });
     }
+
+    if (
+        !req.body ||
+        typeof req.body !== "object" ||
+        Array.isArray(req.body)
+    ) {
+        return res.status(400).json({
+            message: "Invalid request body"
+        });
+    }
+
+    const allowedFields = ["name", "date", "dealer"];
+
+    const receivedFields = Object.keys(req.body);
+
+    const invalidFields = receivedFields.filter(
+        (field) => !allowedFields.includes(field)
+    );
+
+    if (invalidFields.length > 0) {
+        return res.status(400).json({
+            message: "Unexpected fields are not allowed",
+            fields: invalidFields
+        });
+    }
+
+    const { name, date, dealer } = req.body;
 
     if (
         typeof name !== "string" ||
@@ -146,15 +201,12 @@ const updateAppointment = async (req, res) => {
         });
     }
 
-    if (!["pending", "returned"].includes(appointment.status)) {
+    if (
+        appointment.currentDepartment !== "sales" ||
+        !["pending", "returned"].includes(appointment.status)
+    ) {
         return res.status(403).json({
-            message: "Completed appointments cannot be edited"
-        });
-    }
-
-    if (appointment.currentDepartment !== "sales") {
-        return res.status(403).json({
-            message: "Appointment cannot be edited after leaving sales"
+            message: "Application cannot be edited at this stage"
         });
     }
 
@@ -170,16 +222,10 @@ const updateAppointment = async (req, res) => {
     });
 };
 
+
+
 const updateStatus = async (req, res) => {
     const id = req.params.id;
-    const { action, remarks } = req.body;
-    const userRole = req.user.role;
-
-    if (!["approve", "reject", "return"].includes(action)) {
-        return res.status(400).json({
-            message: "Invalid action"
-        });
-    }
 
     if (!mongoose.isValidObjectId(id)) {
         return res.status(400).json({
@@ -187,17 +233,61 @@ const updateStatus = async (req, res) => {
         });
     }
 
-    const cleanRemarks = typeof remarks === "string" ? remarks.trim() : "";
-
-    if (cleanRemarks.length > 500) {
+    if (
+        !req.body ||
+        typeof req.body !== "object" ||
+        Array.isArray(req.body)
+    ) {
         return res.status(400).json({
-            message: "Remarks must be 500 characters or less"
+            message: "Invalid request body"
         });
     }
 
-    if ((action === "reject" || action === "return") && !cleanRemarks) {
+    const allowedFields = ["action", "remarks"];
+
+    const receivedFields = Object.keys(req.body);
+
+    const invalidFields = receivedFields.filter(
+        (field) => !allowedFields.includes(field)
+    );
+
+    if (invalidFields.length > 0) {
         return res.status(400).json({
-            message: "Remarks are required to reject or return an application"
+            message: "Unexpected fields are not allowed",
+            fields: invalidFields
+        });
+    }
+
+    const { action, remarks = "" } = req.body;
+
+    const userRole = req.user.role;
+    const userId = req.user.id;
+
+    const flow = ["sales", "finance", "legal", "head"];
+
+    if (!["approve", "reject", "return"].includes(action)) {
+        return res.status(400).json({
+            message: "Invalid workflow action"
+        });
+    }
+
+    if (
+        typeof remarks !== "string" ||
+        remarks.length > 500
+    ) {
+        return res.status(400).json({
+            message: "Remarks must be a string of at most 500 characters"
+        });
+    }
+
+    const cleanRemarks = remarks.trim();
+
+    if (
+        ["reject", "return"].includes(action) &&
+        !cleanRemarks
+    ) {
+        return res.status(400).json({
+            message: "Remarks are required for rejection or return"
         });
     }
 
@@ -205,52 +295,46 @@ const updateStatus = async (req, res) => {
 
     if (!appointment) {
         return res.status(404).json({
-            message: "Not found"
+            message: "Appointment not found"
         });
     }
 
-    const previousDept = appointment.currentDepartment;
-
-    if (appointment.status === "approved") {
+    if (["approved", "rejected"].includes(appointment.status)) {
         return res.status(400).json({
-            message: "Already approved"
-        });
-    }
-
-    if (appointment.status === "rejected") {
-        return res.status(400).json({
-            message: "Already rejected"
+            message: "This application is already completed"
         });
     }
 
     if (appointment.currentDepartment !== userRole) {
         return res.status(403).json({
-            message: "You are not allowed to act at this stage"
+            message: "You cannot act on another department's application"
         });
     }
 
-    const flow = ["sales", "finance", "legal", "head"];
+    const currentIndex = flow.indexOf(
+        appointment.currentDepartment
+    );
 
-    if (!flow.includes(appointment.currentDepartment)) {
+    if (currentIndex === -1) {
         return res.status(400).json({
-            message: "Invalid department flow"
+            message: "Invalid department"
         });
     }
 
-    if (action === "return" && previousDept === "sales") {
+    if (action === "return" && currentIndex === 0) {
         return res.status(400).json({
-            message: "Sales is the first stage and cannot return an application"
+            message: "Sales cannot return an application"
         });
     }
+
+    const previousDepartment = appointment.currentDepartment;
 
     if (action === "approve") {
-        const index = flow.indexOf(appointment.currentDepartment);
-
-        if (index < flow.length - 1) {
-            appointment.currentDepartment = flow[index + 1];
-            appointment.status = "pending";
-        } else {
+        if (currentIndex === flow.length - 1) {
             appointment.status = "approved";
+        } else {
+            appointment.currentDepartment = flow[currentIndex + 1];
+            appointment.status = "pending";
         }
     }
 
@@ -259,25 +343,27 @@ const updateStatus = async (req, res) => {
     }
 
     if (action === "return") {
+        appointment.currentDepartment = flow[currentIndex - 1];
         appointment.status = "returned";
-        appointment.currentDepartment = "sales";
     }
 
     appointment.history.push({
-        department: previousDept,
+        department: previousDepartment,
         action: action,
+        actedBy: String(userId),
         remarks: cleanRemarks,
-        actedBy: req.user.name || "Unknown",
         date: new Date()
     });
 
     await appointment.save();
 
     return res.status(200).json({
-        message: "Status updated",
+        message: "Workflow action completed successfully",
         data: appointment
     });
 };
+
+
 
 module.exports = {
     createAppointment,

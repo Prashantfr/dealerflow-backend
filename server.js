@@ -20,18 +20,30 @@ const { apiLimiter } = require("./middleware/rateLimiters");
 
 const app = express();
 
-const allowedOrigins = (process.env.CLIENT_URL || "http://localhost:5173")
+const allowedOrigins = (
+    process.env.CLIENT_URL || "http://localhost:5173"
+)
     .split(",")
-    .map((url) => url.trim());
+    .map((url) => url.trim())
+    .filter(Boolean);
 
 app.set("trust proxy", 1);
 
 app.use(helmet());
-app.use(cors({ origin: allowedOrigins }));
-app.use(express.json({ limit: "100kb" }));
+
+app.use(cors({
+    origin: allowedOrigins
+}));
+
+app.use(express.json({
+    limit: "100kb"
+}));
 
 app.get("/health", (req, res) => {
-    res.status(200).json({ success: true, message: "OK" });
+    return res.status(200).json({
+        success: true,
+        message: "OK"
+    });
 });
 
 app.use(apiLimiter);
@@ -60,6 +72,6 @@ mongoose
         });
     })
     .catch((err) => {
-        console.log("MongoDB Connection Error:");
-        console.log(err.message);
+        console.error("MongoDB Connection Error:", err.message);
+        process.exitCode = 1;
     });
