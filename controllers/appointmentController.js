@@ -1,6 +1,10 @@
 const mongoose = require("mongoose");
 const Appointment = require("../models/appointmentModel");
+const User = require("../models/userModel");
 
+const {
+    getUnverifiedDocuments
+} = require("../utils/documentRequirements");
 
 const createAppointment = async (req, res) => {
 
@@ -96,8 +100,34 @@ const getAppointmentById = async (req, res) => {
         });
     }
 
-    res.status(200).json({
-        data: appointment
+    const userIds = [
+        ...new Set(
+            appointment.history
+                .map((entry) => entry.actedBy)
+                .filter((userId) => mongoose.isValidObjectId(userId))
+        )
+    ];
+
+    const users = await User.find({
+        _id: { $in: userIds }
+    }).select("_id name").lean();
+
+    const userMap = new Map(
+        users.map((user) => [
+            String(user._id),
+            user.name
+        ])
+    );
+
+    const appointmentData = appointment.toObject();
+
+    appointmentData.history = appointmentData.history.map((entry) => ({
+        ...entry,
+        actedByName: userMap.get(String(entry.actedBy)) || null
+    }));
+
+    return res.status(200).json({
+        data: appointmentData
     });
 };
 
@@ -223,7 +253,6 @@ const updateAppointment = async (req, res) => {
 };
 
 
-
 const updateStatus = async (req, res) => {
     const id = req.params.id;
 
@@ -233,25 +262,18 @@ const updateStatus = async (req, res) => {
         });
     }
 
-    if (
-        !req.body ||
-        typeof req.body !== "object" ||
-        Array.isArray(req.body)
-    ) {
+    if (!req.body || typeof req.body !== "object" ||
+        Array.isArray(req.body)) {
         return res.status(400).json({
             message: "Invalid request body"
         });
     }
 
-    const allowedFields = ["action", "remarks"];
-
-    const receivedFields = Object.keys(req.body);
-
-    const invalidFields = receivedFields.filter(
-        (field) => !allowedFields.includes(field)
+    const invalidFields = Object.keys(req.body).filter(
+        field => !["action", "remarks"].includes(field)
     );
 
-    if (invalidFields.length > 0) {
+    if (invalidFields.length) {
         return res.status(400).json({
             message: "Unexpected fields are not allowed",
             fields: invalidFields
@@ -260,34 +282,23 @@ const updateStatus = async (req, res) => {
 
     const { action, remarks = "" } = req.body;
 
-    const userRole = req.user.role;
-    const userId = req.user.id;
-
-    const flow = ["sales", "finance", "legal", "head"];
-
-    if (!["approve", "reject", "return"].includes(action)) {
+    if (!["approve", "reject", "return", "resubmit"].includes(action)) {
         return res.status(400).json({
             message: "Invalid workflow action"
         });
     }
 
-    if (
-        typeof remarks !== "string" ||
-        remarks.length > 500
-    ) {
+    if (typeof remarks !== "string" || remarks.length > 500) {
         return res.status(400).json({
-            message: "Remarks must be a string of at most 500 characters"
+            message: "Invalid remarks"
         });
     }
 
     const cleanRemarks = remarks.trim();
 
-    if (
-        ["reject", "return"].includes(action) &&
-        !cleanRemarks
-    ) {
+    if (["reject", "return"].includes(action) && !cleanRemarks) {
         return res.status(400).json({
-            message: "Remarks are required for rejection or return"
+            message: "Remarks are required"
         });
     }
 
@@ -305,15 +316,14 @@ const updateStatus = async (req, res) => {
         });
     }
 
-    if (appointment.currentDepartment !== userRole) {
+    if (appointment.currentDepartment !== req.user.role) {
         return res.status(403).json({
             message: "You cannot act on another department's application"
         });
     }
 
-    const currentIndex = flow.indexOf(
-        appointment.currentDepartment
-    );
+    const flow = ["sales", "finance", "legal", "head"];
+    const currentIndex = flow.indexOf(appointment.currentDepartment);
 
     if (currentIndex === -1) {
         return res.status(400).json({
@@ -321,10 +331,36 @@ const updateStatus = async (req, res) => {
         });
     }
 
+    if (appointment.status === "returned" && action !== "resubmit") {
+        return res.status(400).json({
+            message: "Returned applications must be resubmitted"
+        });
+    }
+
+    if (appointment.status === "pending" && action === "resubmit") {
+        return res.status(400).json({
+            message: "Only returned applications can be resubmitted"
+        });
+    }
+
     if (action === "return" && currentIndex === 0) {
         return res.status(400).json({
             message: "Sales cannot return an application"
         });
+    }
+
+    if (action === "approve" || action === "resubmit") {
+        const unverified = getUnverifiedDocuments(
+            appointment,
+            appointment.currentDepartment
+        );
+
+        if (unverified.length) {
+            return res.status(409).json({
+                message: "Required documents must be verified before proceeding",
+                documents: unverified
+            });
+        }
     }
 
     const previousDepartment = appointment.currentDepartment;
@@ -336,23 +372,67 @@ const updateStatus = async (req, res) => {
             appointment.currentDepartment = flow[currentIndex + 1];
             appointment.status = "pending";
         }
+    } 
+    
+    if (action === "resubmit") {
+    let destination = appointment.returnToDepartment;
+
+    // Recover the destination for older returned applications.
+    if (!destination) {
+        const lastReturn = [...appointment.history]
+            .reverse()
+            .find((entry) => entry.action === "return");
+
+        if (lastReturn) {
+            const returnedBy = lastReturn.fromDepartment;
+
+            if (
+                flow.includes(returnedBy) &&
+                flow.indexOf(returnedBy) > currentIndex &&
+                lastReturn.toDepartment === "sales"
+            ) {
+                destination = returnedBy;
+            }
+        }
+    }
+
+    if (
+        !destination ||
+        !flow.includes(destination) ||
+        flow.indexOf(destination) <= currentIndex
+    ) {
+        return res.status(409).json({
+            message:
+                "Return destination could not be recovered. Check the application's return history."
+        });
+    }
+
+    appointment.currentDepartment = destination;
+    appointment.status = "pending";
+    appointment.returnToDepartment = null;
+   }
+
+
+
+    if (action === "return") {
+        appointment.returnToDepartment = previousDepartment;
+        appointment.currentDepartment = "sales";
+        appointment.status = "returned";
     }
 
     if (action === "reject") {
         appointment.status = "rejected";
-    }
-
-    if (action === "return") {
-        appointment.currentDepartment = flow[currentIndex - 1];
-        appointment.status = "returned";
+        appointment.returnToDepartment = null;
     }
 
     appointment.history.push({
         department: previousDepartment,
-        action: action,
-        actedBy: String(userId),
+        action,
+        actedBy: String(req.user.id),
         remarks: cleanRemarks,
-        date: new Date()
+        date: new Date(),
+        fromDepartment: previousDepartment,
+        toDepartment: appointment.currentDepartment
     });
 
     await appointment.save();
@@ -362,7 +442,6 @@ const updateStatus = async (req, res) => {
         data: appointment
     });
 };
-
 
 
 module.exports = {

@@ -6,6 +6,13 @@ const errorMiddleware = (err, req, res, next) => {
         console.error("Request failed:", err.message);
     }
 
+    if (err.name === "VersionError") {
+        return res.status(409).json({
+            success: false,
+            message: "This application was modified by another request. Please refresh and try again."
+        });
+    }
+
     if (
         err instanceof SyntaxError &&
         err.status === 400 &&
